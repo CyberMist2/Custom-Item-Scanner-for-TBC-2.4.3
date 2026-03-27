@@ -1,3 +1,5 @@
+<img width="1559" height="824" alt="image" src="https://github.com/user-attachments/assets/8c863d10-5c53-436b-a305-18dda1a859fe" />
+
 # Custom Item Scanner
 
 Addon for **World of Warcraft: The Burning Crusade (2.4.3)** clients. It scans a range of **item IDs**, records any item the client can resolve with `GetItemInfo`, and shows the results in a sortable list with search and quality filters.
