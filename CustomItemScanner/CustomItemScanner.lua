@@ -35,6 +35,9 @@ local qualityFilter = nil
 local listDirty = true
 local scrollFrame
 local UpdateWindow
+local settingsFocusEdits = {}
+local settingsWindow
+local RefreshSettingsFields
 
 if not CustomItemScannerDB then
     CustomItemScannerDB = {}
@@ -47,6 +50,45 @@ end
 if not CustomItemScannerDB.minimapAngle then
     CustomItemScannerDB.minimapAngle = 220
 end
+
+if not CustomItemScannerDB.settings then
+    CustomItemScannerDB.settings = {}
+end
+
+local SETTINGS_DEFAULTS = {
+    batchSize = 100,
+    delay = 0.10,
+    useServerRequests = true,
+    maxServerRequestsPerTick = 5,
+    chunkSize = 10000,
+    chunkCooldown = 3.0,
+}
+
+local function ApplySettingsToScanner()
+    if not CustomItemScannerDB.settings then
+        CustomItemScannerDB.settings = {}
+    end
+    local s = CustomItemScannerDB.settings
+    for k, v in pairs(SETTINGS_DEFAULTS) do
+        if s[k] == nil then
+            s[k] = v
+        end
+    end
+    scanner.batchSize = math.max(1, math.min(500, math.floor(tonumber(s.batchSize) or SETTINGS_DEFAULTS.batchSize)))
+    scanner.delay = math.max(0.01, math.min(2.0, tonumber(s.delay) or SETTINGS_DEFAULTS.delay))
+    scanner.useServerRequests = s.useServerRequests and true or false
+    scanner.maxServerRequestsPerTick = math.max(0, math.min(50, math.floor(tonumber(s.maxServerRequestsPerTick) or SETTINGS_DEFAULTS.maxServerRequestsPerTick)))
+    scanner.chunkSize = math.max(100, math.min(1000000, math.floor(tonumber(s.chunkSize) or SETTINGS_DEFAULTS.chunkSize)))
+    scanner.chunkCooldown = math.max(0, math.min(120, tonumber(s.chunkCooldown) or SETTINGS_DEFAULTS.chunkCooldown))
+    s.batchSize = scanner.batchSize
+    s.delay = scanner.delay
+    s.useServerRequests = scanner.useServerRequests
+    s.maxServerRequestsPerTick = scanner.maxServerRequestsPerTick
+    s.chunkSize = scanner.chunkSize
+    s.chunkCooldown = scanner.chunkCooldown
+end
+
+ApplySettingsToScanner()
 
 local function Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99[CustomItemScanner]|r " .. msg)
@@ -218,7 +260,12 @@ statusText:SetText("Status: Idle")
 
 local infoText = mainWindow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 infoText:SetPoint("TOPLEFT", 16, -50)
-infoText:SetText("Found items: 0")
+infoText:SetText("Listed: 0")
+
+local totalDiscoveredText = mainWindow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+totalDiscoveredText:SetPoint("TOPRIGHT", -40, -50)
+totalDiscoveredText:SetJustifyH("RIGHT")
+totalDiscoveredText:SetText("Total discovered: 0")
 
 -- ==================== RANGE CONTROLS ====================
 
@@ -338,6 +385,9 @@ local function ClearFocus()
     startEdit:ClearFocus()
     endEdit:ClearFocus()
     searchEdit:ClearFocus()
+    for _, eb in ipairs(settingsFocusEdits) do
+        eb:ClearFocus()
+    end
 end
 
 startEdit:SetScript("OnEscapePressed", function(self)
@@ -531,10 +581,13 @@ UpdateWindow = function()
         end
     end
 
+    local storedTotal = CountFound()
+    totalDiscoveredText:SetText("Total discovered: " .. storedTotal)
+
     if searchText ~= "" or qualityFilter ~= nil then
-        infoText:SetText("Found items: " .. totalItems .. " (filtered)")
+        infoText:SetText("Listed: " .. totalItems .. " (matching filters)")
     else
-        infoText:SetText("Found items: " .. totalItems)
+        infoText:SetText("Listed: " .. totalItems)
     end
 
     if scanner.running and not scanner.paused then
@@ -607,6 +660,182 @@ stopButton:SetScript("OnClick", function()
     StopScan()
     UpdateWindow()
     Print("Scan stopped.")
+end)
+
+-- ==================== SETTINGS WINDOW ====================
+
+settingsWindow = CreateFrame("Frame", "CustomItemScannerSettingsWindow", UIParent)
+settingsWindow:SetWidth(440)
+settingsWindow:SetHeight(360)
+settingsWindow:SetPoint("CENTER")
+settingsWindow:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = true,
+    tileSize = 16,
+    edgeSize = 16,
+    insets = { left = 4, right = 4, top = 4, bottom = 4 }
+})
+settingsWindow:SetBackdropColor(0, 0, 0, 1)
+settingsWindow:EnableMouse(true)
+settingsWindow:SetMovable(true)
+settingsWindow:SetClampedToScreen(true)
+settingsWindow:RegisterForDrag("LeftButton")
+settingsWindow:SetScript("OnDragStart", function(self)
+    self:StartMoving()
+end)
+settingsWindow:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+end)
+settingsWindow:SetFrameStrata("DIALOG")
+settingsWindow:Hide()
+
+tinsert(UISpecialFrames, "CustomItemScannerSettingsWindow")
+
+local settingsTitle = settingsWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+settingsTitle:SetPoint("TOP", 0, -14)
+settingsTitle:SetText("Scanner settings")
+
+local settingsClose = CreateFrame("Button", nil, settingsWindow, "UIPanelCloseButton")
+settingsClose:SetPoint("TOPRIGHT", -5, -5)
+settingsClose:SetScript("OnClick", function()
+    ClearFocus()
+    RefreshSettingsFields()
+    settingsWindow:Hide()
+end)
+
+local function MakeSettingsRow(parent, y, labelText, editWidth)
+    local lab = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    lab:SetPoint("TOPLEFT", 24, y)
+    lab:SetText(labelText)
+    local eb = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
+    eb:SetPoint("TOPLEFT", 220, y + 2)
+    eb:SetWidth(editWidth or 90)
+    eb:SetHeight(20)
+    eb:SetAutoFocus(false)
+    ApplyTextboxBackdrop(eb)
+    tinsert(settingsFocusEdits, eb)
+    eb:SetScript("OnEscapePressed", function(self)
+        self:ClearFocus()
+    end)
+    eb:SetScript("OnEnterPressed", function(self)
+        self:ClearFocus()
+    end)
+    return eb
+end
+
+local settingsBatchEdit = MakeSettingsRow(settingsWindow, -52, "IDs per tick (batch):", 70)
+settingsBatchEdit:SetNumeric(true)
+
+local settingsDelayEdit = MakeSettingsRow(settingsWindow, -52 - 28, "Seconds between ticks:", 70)
+
+local settingsChunkEdit = MakeSettingsRow(settingsWindow, -52 - 56, "Chunk size (IDs per pause):", 70)
+settingsChunkEdit:SetNumeric(true)
+
+local settingsCooldownEdit = MakeSettingsRow(settingsWindow, -52 - 84, "Chunk cooldown (seconds):", 70)
+
+local settingsMaxSrvEdit = MakeSettingsRow(settingsWindow, -52 - 112, "Max server requests per tick:", 70)
+settingsMaxSrvEdit:SetNumeric(true)
+
+local settingsServerCheck = CreateFrame("CheckButton", nil, settingsWindow, "UICheckButtonTemplate")
+settingsServerCheck:SetPoint("TOPLEFT", 24, -52 - 140)
+local srvLabel = settingsWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+srvLabel:SetPoint("LEFT", settingsServerCheck, "RIGHT", 4, 0)
+srvLabel:SetText("Server request assist (hyperlink)")
+
+local settingsHelp = settingsWindow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+settingsHelp:SetPoint("TOPLEFT", 24, -52 - 175)
+settingsHelp:SetWidth(392)
+settingsHelp:SetJustifyH("LEFT")
+settingsHelp:SetText("Lower batch size and delay for stability. Disable server assist for very large scans. Chunking splits long ranges with pauses.")
+
+RefreshSettingsFields = function()
+    if not CustomItemScannerDB.settings then
+        CustomItemScannerDB.settings = {}
+    end
+    local s = CustomItemScannerDB.settings
+    for k, v in pairs(SETTINGS_DEFAULTS) do
+        if s[k] == nil then
+            s[k] = v
+        end
+    end
+    settingsBatchEdit:SetText(tostring(s.batchSize))
+    settingsDelayEdit:SetText(tostring(s.delay))
+    settingsChunkEdit:SetText(tostring(s.chunkSize))
+    settingsCooldownEdit:SetText(tostring(s.chunkCooldown))
+    settingsMaxSrvEdit:SetText(tostring(s.maxServerRequestsPerTick))
+    settingsServerCheck:SetChecked(s.useServerRequests)
+end
+
+local function SaveSettingsFromFields()
+    if not CustomItemScannerDB.settings then
+        CustomItemScannerDB.settings = {}
+    end
+    local s = CustomItemScannerDB.settings
+    s.batchSize = tonumber(settingsBatchEdit:GetText()) or SETTINGS_DEFAULTS.batchSize
+    s.delay = tonumber(settingsDelayEdit:GetText()) or SETTINGS_DEFAULTS.delay
+    s.chunkSize = tonumber(settingsChunkEdit:GetText()) or SETTINGS_DEFAULTS.chunkSize
+    s.chunkCooldown = tonumber(settingsCooldownEdit:GetText()) or SETTINGS_DEFAULTS.chunkCooldown
+    s.maxServerRequestsPerTick = tonumber(settingsMaxSrvEdit:GetText()) or SETTINGS_DEFAULTS.maxServerRequestsPerTick
+    local chk = settingsServerCheck:GetChecked()
+    s.useServerRequests = (chk == true or chk == 1)
+    ApplySettingsToScanner()
+    Print("Scanner settings saved.")
+end
+
+local function ResetSettingsToDefaults()
+    for k, v in pairs(SETTINGS_DEFAULTS) do
+        CustomItemScannerDB.settings[k] = v
+    end
+    ApplySettingsToScanner()
+    RefreshSettingsFields()
+    Print("Settings reset to defaults.")
+end
+
+local settingsOk = CreateFrame("Button", nil, settingsWindow, "UIPanelButtonTemplate")
+settingsOk:SetWidth(100)
+settingsOk:SetHeight(24)
+settingsOk:SetPoint("BOTTOMRIGHT", -24, 24)
+settingsOk:SetText("OK")
+settingsOk:SetScript("OnClick", function()
+    ClearFocus()
+    SaveSettingsFromFields()
+    settingsWindow:Hide()
+    if UpdateWindow then
+        UpdateWindow()
+    end
+end)
+
+local settingsCancel = CreateFrame("Button", nil, settingsWindow, "UIPanelButtonTemplate")
+settingsCancel:SetWidth(100)
+settingsCancel:SetHeight(24)
+settingsCancel:SetPoint("RIGHT", settingsOk, "LEFT", -10, 0)
+settingsCancel:SetText("Cancel")
+settingsCancel:SetScript("OnClick", function()
+    ClearFocus()
+    RefreshSettingsFields()
+    settingsWindow:Hide()
+end)
+
+local settingsDefaultsBtn = CreateFrame("Button", nil, settingsWindow, "UIPanelButtonTemplate")
+settingsDefaultsBtn:SetWidth(100)
+settingsDefaultsBtn:SetHeight(24)
+settingsDefaultsBtn:SetPoint("BOTTOMLEFT", 24, 24)
+settingsDefaultsBtn:SetText("Defaults")
+settingsDefaultsBtn:SetScript("OnClick", function()
+    ClearFocus()
+    ResetSettingsToDefaults()
+end)
+
+local settingsButton = CreateFrame("Button", nil, mainWindow, "UIPanelButtonTemplate")
+settingsButton:SetWidth(100)
+settingsButton:SetHeight(22)
+settingsButton:SetPoint("BOTTOMRIGHT", mainWindow, "BOTTOMRIGHT", -16, 20)
+settingsButton:SetText("Settings")
+settingsButton:SetScript("OnClick", function()
+    ClearFocus()
+    RefreshSettingsFields()
+    settingsWindow:Show()
 end)
 
 -- ==================== MINIMAP BUTTON ====================
@@ -796,13 +1025,23 @@ SlashCmdList["CUSTOMITEMSCANNER"] = function(msg)
     elseif cmd == "count" then
         Print("Found items: " .. CountFound())
 
+    elseif cmd == "settings" then
+        ClearFocus()
+        RefreshSettingsFields()
+        settingsWindow:Show()
+
     elseif cmd == "server" then
+        if not CustomItemScannerDB.settings then
+            CustomItemScannerDB.settings = {}
+        end
         local mode = strlower(arg1 or "")
         if mode == "on" then
             scanner.useServerRequests = true
+            CustomItemScannerDB.settings.useServerRequests = true
             Print("Server request mode enabled. Use smaller ranges to avoid client instability.")
         elseif mode == "off" then
             scanner.useServerRequests = false
+            CustomItemScannerDB.settings.useServerRequests = false
             Print("Server request mode disabled (cache-only mode).")
         else
             Print("Server mode is currently: " .. (scanner.useServerRequests and "ON" or "OFF"))
@@ -810,7 +1049,7 @@ SlashCmdList["CUSTOMITEMSCANNER"] = function(msg)
         end
 
     else
-        Print("Commands: /cis show | hide | toggle | start [from] [to] | stop | refresh | clear | count | server on|off")
+        Print("Commands: /cis show | hide | settings | toggle | start [from] [to] | stop | refresh | clear | count | server on|off")
     end
 end
 
