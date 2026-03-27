@@ -1,0 +1,8 @@
+## Interface: 20400
+## Title: Custom Item Scanner
+## Notes: Scans item IDs for custom items
+## Author: ChatGPT
+## Version: 1.0
+## SavedVariables: CustomItemScannerDB
+
+CustomItemScanner.lua
